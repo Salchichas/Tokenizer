@@ -1,31 +1,13 @@
 #include <memory>
 
-#define BOOST_PYTHON_MAX_ARITY 24
-#include <boost/python.hpp>
-#include <boost/python/stl_iterator.hpp>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <onmt/Tokenizer.h>
 #include <onmt/BPE.h>
 #include <onmt/SentencePiece.h>
 
-namespace py = boost::python;
-
-template <typename T>
-static std::vector<T> to_std_vector(const py::object& iterable)
-{
-  return std::vector<T>(py::stl_input_iterator<T>(iterable),
-                        py::stl_input_iterator<T>());
-}
-
-
-template <typename T>
-static py::list to_py_list(const std::vector<T> vec)
-{
-  py::list list;
-  for (const auto& elem : vec)
-    list.append(elem);
-  return list;
-}
+namespace py = pybind11;
 
 template <typename T>
 T copy(const T& v)
@@ -75,7 +57,7 @@ static onmt::Tokenizer* make_tokenizer(const std::string& mode,
                                        bool segment_case,
                                        bool segment_numbers,
                                        bool segment_alphabet_change,
-                                       py::list segment_alphabet) {
+                                       const std::vector<std::string>& segment_alphabet) {
   int flags = 0;
   if (joiner_annotate)
     flags |= onmt::Tokenizer::Flags::JoinerAnnotate;
@@ -105,9 +87,8 @@ static onmt::Tokenizer* make_tokenizer(const std::string& mode,
   onmt::Tokenizer::Mode tok_mode = onmt::Tokenizer::mapMode.at(mode);
   auto tokenizer = new onmt::Tokenizer(tok_mode, subword_encoder, flags, joiner);
 
-  for (auto it = py::stl_input_iterator<std::string>(segment_alphabet);
-       it != py::stl_input_iterator<std::string>(); it++)
-    tokenizer->add_alphabet_to_segment(*it);
+  for (const auto& alphabet : segment_alphabet)
+    tokenizer->add_alphabet_to_segment(alphabet);
 
   return tokenizer;
 }
@@ -143,7 +124,7 @@ public:
                    bool segment_case,
                    bool segment_numbers,
                    bool segment_alphabet_change,
-                   py::list segment_alphabet)
+                   const std::vector<std::string>& segment_alphabet)
   : _subword_encoder(make_subword_encoder(
                        bpe_model_path,
                        joiner,
@@ -172,51 +153,27 @@ public:
   {
   }
 
-  py::tuple tokenize(const std::string& text) const
+  std::tuple<std::vector<std::string>, std::vector<std::vector<std::string>>>
+  tokenize(const std::string& text) const
   {
     std::vector<std::string> words;
-    std::vector<std::vector<std::string> > features;
-
+    std::vector<std::vector<std::string>> features;
     _tokenizer->tokenize(text, words, features);
-
-    py::list words_list = to_py_list(words);
-
-    if (features.empty())
-      return py::make_tuple(words_list, py::object());
-    else
-    {
-      std::vector<py::list> features_tmp;
-      for (const auto& feature : features)
-        features_tmp.push_back(to_py_list(feature));
-
-      return py::make_tuple(words_list, to_py_list(features_tmp));
-    }
+    return std::make_tuple(std::move(words), std::move(features));
   }
 
-  py::tuple detokenize_with_ranges(const py::object& words, bool merge_ranges) const
+  std::tuple<std::string, onmt::Ranges>
+  detokenize_with_ranges(const std::vector<std::string>& words, bool merge_ranges) const
   {
     onmt::Ranges ranges;
-    std::string text = _tokenizer->detokenize(to_std_vector<std::string>(words),
-                                              ranges, merge_ranges);
-    py::dict ranges_py;
-    for (const auto& pair : ranges)
-      ranges_py[pair.first] = py::make_tuple(pair.second.first, pair.second.second);
-    return py::make_tuple(text, ranges_py);
+    std::string text = _tokenizer->detokenize(words, ranges, merge_ranges);
+    return std::make_tuple(std::move(text), std::move(ranges));
   }
 
-  std::string detokenize(const py::object& words, const py::object& features) const
+  std::string detokenize(const std::vector<std::string>& words,
+                         const std::vector<std::vector<std::string>>& features) const
   {
-    std::vector<std::string> words_vec = to_std_vector<std::string>(words);
-    std::vector<std::vector<std::string> > features_vec;
-
-    if (features != py::object())
-    {
-      for (auto it = py::stl_input_iterator<py::list>(features);
-           it != py::stl_input_iterator<py::list>(); it++)
-        features_vec.push_back(to_std_vector<std::string>(*it));
-    }
-
-    return _tokenizer->detokenize(words_vec, features_vec);
+    return _tokenizer->detokenize(words, features);
   }
 
 private:
@@ -224,12 +181,11 @@ private:
   const std::shared_ptr<onmt::Tokenizer> _tokenizer;
 };
 
-BOOST_PYTHON_MODULE(tokenizer)
+PYBIND11_MODULE(tokenizer, m)
 {
-  py::class_<TokenizerWrapper>(
-      "Tokenizer",
-      py::init<std::string, std::string, std::string, int, std::string, int, std::string, int, float, std::string, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, py::list>(
-        (py::arg("mode"),
+  py::class_<TokenizerWrapper>(m, "Tokenizer")
+    .def(py::init<std::string, std::string, std::string, int, std::string, int, std::string, int, float, std::string, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, const std::vector<std::string>&>(),
+         py::arg("mode"),
          py::arg("bpe_model_path")="",
          py::arg("bpe_vocab_path")="",  // Keep for backward compatibility.
          py::arg("bpe_vocab_threshold")=50,  // Keep for backward compatibility.
@@ -251,13 +207,12 @@ BOOST_PYTHON_MODULE(tokenizer)
          py::arg("segment_case")=false,
          py::arg("segment_numbers")=false,
          py::arg("segment_alphabet_change")=false,
-         py::arg("segment_alphabet")=py::list())))
-    .def("tokenize", &TokenizerWrapper::tokenize,
-         (py::arg("text")))
+         py::arg("segment_alphabet")=py::list())
+    .def("tokenize", &TokenizerWrapper::tokenize, py::arg("text"))
     .def("detokenize", &TokenizerWrapper::detokenize,
-         (py::arg("tokens"), py::arg("features")=py::object()))
+         py::arg("tokens"), py::arg("features")=py::object())
     .def("detokenize_with_ranges", &TokenizerWrapper::detokenize_with_ranges,
-         (py::arg("tokens"), py::arg("merge_ranges")=false))
+         py::arg("tokens"), py::arg("merge_ranges")=false)
     .def("__copy__", copy<TokenizerWrapper>)
     .def("__deepcopy__", deepcopy<TokenizerWrapper>)
     ;
